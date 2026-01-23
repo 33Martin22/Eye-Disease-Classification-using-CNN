@@ -37,7 +37,14 @@ st.set_page_config(page_title="Eye Disease Classification", page_icon='👁️')
 
 st.title("Eye Diseases Classification 👁️")
 st.markdown("**This project uses a deep learning model based on EfficientNetB7 to classify retinal images into four categories: Normal, Diabetic Retinopathy, Cataract, and Glaucoma. The model achieves an overall accuracy of 95%, demonstrating strong performance in detecting various eye conditions.🚨**")
-st.image('diabetic-eye-issues-5-ways-diabetes-impacts-vision.jpg')
+
+# Display banner image from URL instead of local file
+banner_url = "https://images.unsplash.com/photo-1559757175-0eb30cd8c063?w=800"
+try:
+    st.image(banner_url, caption="AI-Powered Eye Disease Detection", use_container_width=True)
+except:
+    pass  # Skip if image fails to load
+
 st.divider()
 
 st.sidebar.markdown("## 🩺 Eye Disease Descriptions")
