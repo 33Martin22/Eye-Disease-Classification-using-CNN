@@ -3,4 +3,4 @@ tensorflow
 keras
 Pillow
 numpy
-opencv-python-headless
+gdown
