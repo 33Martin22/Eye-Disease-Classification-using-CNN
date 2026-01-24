@@ -92,8 +92,14 @@ with col2:
         st.image(Right_Eye, caption="Right Eye", use_container_width=True)
 
 if Right_Eye is not None and Left_Eye is not None:
+    # Read images once
+    Left_Eye.seek(0)  # Reset file pointer
+    Right_Eye.seek(0)  # Reset file pointer
+    
+    left_img = Image.open(Left_Eye).convert('RGB')
+    right_img = Image.open(Right_Eye).convert('RGB')
+    
     def predict_image(image):
-        image = Image.open(image).convert('RGB')    
         image = image.resize((224, 224))                    
         image_np = np.array(image, dtype='float32')   
         image_np = preprocess_input(image_np)            
@@ -104,8 +110,8 @@ if Right_Eye is not None and Left_Eye is not None:
         predicted_class_index = np.argmax(probs)
         return predicted_class_index, probs
 
-    predicted_class_index_left, prop_left = predict_image(Left_Eye)
-    predicted_class_index_right, prop_right = predict_image(Right_Eye)
+    predicted_class_index_left, prop_left = predict_image(left_img)
+    predicted_class_index_right, prop_right = predict_image(right_img)
 
     class_names = list(Class_Names_Dict.keys())
 
