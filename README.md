@@ -21,8 +21,7 @@ This project uses a convolutional neural network (CNN) to classify retinal image
 - ☁️ Automatic model download from Google Drive
 - 📱 Responsive design for various screen sizes
 
-## Demo
-##Click the link below to interact with the model
+## DemoClick the link below to interact with the model
 https://eye-disease-classification-using-cnn-atbs6tgepmjbvqyxsbxbvt.streamlit.app/   
 ## Technology Stack
 
