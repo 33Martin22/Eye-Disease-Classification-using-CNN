@@ -22,8 +22,8 @@ This project uses a convolutional neural network (CNN) to classify retinal image
 - 📱 Responsive design for various screen sizes
 
 ## Demo
-
-
+##Click the link below to interact with the model
+https://eye-disease-classification-using-cnn-atbs6tgepmjbvqyxsbxbvt.streamlit.app/   
 ## Technology Stack
 
 - **Deep Learning Framework**: TensorFlow/Keras
@@ -147,7 +147,7 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 ## Acknowledgments
 
 - EfficientNet architecture by Google Research
-- Dataset: [Specify your dataset source here]
+- Dataset: Kaggle Datasets
 - Streamlit for the amazing web framework
 - TensorFlow/Keras teams for deep learning tools
 
