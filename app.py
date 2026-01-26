@@ -1,3 +1,4 @@
+#import te required libraries
 import streamlit as st
 from PIL import Image
 import numpy as np
@@ -6,7 +7,7 @@ from tensorflow.keras.applications.efficientnet import preprocess_input
 import gdown
 import os
 
-# Google Drive file ID - REPLACE THIS WITH YOUR FILE ID
+# Google Drive file ID 
 GDRIVE_FILE_ID = "1NQNGV_Vxe9xP2tSMqV10OUc3ukUzh3rB"
 MODEL_PATH = "model_EfficientNetB7.h5"
 
