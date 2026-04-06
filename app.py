@@ -27,7 +27,7 @@ def download_model():
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="EyeAI – Retinal Disease Classifier",
+    page_title="Eye Retinal Disease Classifier",
     page_icon="👁️",
     layout="wide",
 )
