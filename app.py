@@ -6,7 +6,6 @@ from keras.models import load_model
 from tensorflow.keras.applications.efficientnet import preprocess_input
 import gdown
 import os
-import json
 import csv
 import datetime
 
@@ -19,66 +18,92 @@ CATARACT_IMG = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAIBAQEBA
 # ── Model config ──────────────────────────────────────────────────────────────
 GDRIVE_FILE_ID = "1NQNGV_Vxe9xP2tSMqV10OUc3ukUzh3rB"
 MODEL_PATH     = "model_EfficientNetB7.h5"
-METRICS_FILE   = "prediction_metrics_log.csv"
+METRICS_FILE   = "ground_truth_log.csv"
 
-# ── Metrics Logger ────────────────────────────────────────────────────────────
-def init_metrics_log():
-    """Create CSV log file with headers if it does not exist."""
+CLASS_NAMES  = {0: "Glaucoma", 1: "Normal", 2: "Diabetic Retinopathy", 3: "Cataract"}
+CLASS_LIST   = list(CLASS_NAMES.values())
+
+# ═══════════════════════════════════════════════════════════════════
+# METRICS LOGGING  (needs true label + predicted label per sample)
+# ═══════════════════════════════════════════════════════════════════
+def init_log():
     if not os.path.exists(METRICS_FILE):
         with open(METRICS_FILE, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                "timestamp", "eye_side",
-                "predicted_class", "confidence_%",
-                "glaucoma_%", "normal_%", "diabetic_retinopathy_%", "cataract_%",
-                "inference_time_ms"
-            ])
+            csv.writer(f).writerow(["timestamp", "eye_side", "true_label", "predicted_label", "confidence_%"])
 
-def log_prediction(eye_side, predicted_class, probs, inference_ms):
-    """Append one prediction row to the CSV metrics log."""
+def append_log(eye_side, true_label, predicted_label, confidence):
     with open(METRICS_FILE, "a", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow([
+        csv.writer(f).writerow([
             datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            eye_side,
-            predicted_class,
-            round(float(np.max(probs)) * 100, 2),
-            round(float(probs[0]) * 100, 2),  # Glaucoma
-            round(float(probs[1]) * 100, 2),  # Normal
-            round(float(probs[2]) * 100, 2),  # Diabetic Retinopathy
-            round(float(probs[3]) * 100, 2),  # Cataract
-            round(inference_ms, 2),
+            eye_side, true_label, predicted_label, round(confidence * 100, 2)
         ])
 
-def load_metrics_log():
-    """Return all logged predictions as a list of dicts."""
+def load_log():
     if not os.path.exists(METRICS_FILE):
         return []
-    rows = []
-    with open(METRICS_FILE, "r") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            rows.append(row)
-    return rows
+    with open(METRICS_FILE) as f:
+        return list(csv.DictReader(f))
 
-def compute_summary(rows):
-    """Compute summary statistics from logged predictions."""
+def compute_metrics(rows):
+    """
+    Compute per-class and macro-averaged Accuracy, Precision, Recall, F1
+    from the logged true_label / predicted_label pairs.
+    """
     if not rows:
         return None
-    total      = len(rows)
-    classes    = [r["predicted_class"] for r in rows]
-    confs      = [float(r["confidence_%"]) for r in rows]
-    times      = [float(r["inference_time_ms"]) for r in rows]
-    class_dist = {}
+
+    classes = CLASS_LIST
+    n = len(rows)
+
+    # Confusion matrix counts per class
+    tp = {c: 0 for c in classes}
+    fp = {c: 0 for c in classes}
+    fn = {c: 0 for c in classes}
+    tn = {c: 0 for c in classes}
+    correct = 0
+
+    for r in rows:
+        t = r["true_label"]
+        p = r["predicted_label"]
+        if t == p:
+            correct += 1
+        for c in classes:
+            if t == c and p == c:
+                tp[c] += 1
+            elif t != c and p == c:
+                fp[c] += 1
+            elif t == c and p != c:
+                fn[c] += 1
+            else:
+                tn[c] += 1
+
+    overall_accuracy = round(correct / n * 100, 2)
+
+    per_class = {}
     for c in classes:
-        class_dist[c] = class_dist.get(c, 0) + 1
+        prec = tp[c] / (tp[c] + fp[c]) if (tp[c] + fp[c]) > 0 else 0.0
+        rec  = tp[c] / (tp[c] + fn[c]) if (tp[c] + fn[c]) > 0 else 0.0
+        f1   = (2 * prec * rec / (prec + rec)) if (prec + rec) > 0 else 0.0
+        per_class[c] = {
+            "precision": round(prec * 100, 1),
+            "recall":    round(rec  * 100, 1),
+            "f1":        round(f1   * 100, 1),
+            "support":   tp[c] + fn[c],
+        }
+
+    valid_classes = [c for c in classes if per_class[c]["support"] > 0]
+    macro_precision = round(sum(per_class[c]["precision"] for c in valid_classes) / len(valid_classes), 1) if valid_classes else 0.0
+    macro_recall    = round(sum(per_class[c]["recall"]    for c in valid_classes) / len(valid_classes), 1) if valid_classes else 0.0
+    macro_f1        = round(sum(per_class[c]["f1"]        for c in valid_classes) / len(valid_classes), 1) if valid_classes else 0.0
+
     return {
-        "total_predictions": total,
-        "avg_confidence":    round(sum(confs) / total, 2),
-        "min_confidence":    round(min(confs), 2),
-        "max_confidence":    round(max(confs), 2),
-        "avg_inference_ms":  round(sum(times) / total, 2),
-        "class_distribution": class_dist,
+        "total":            n,
+        "overall_accuracy": overall_accuracy,
+        "macro_precision":  macro_precision,
+        "macro_recall":     macro_recall,
+        "macro_f1":         macro_f1,
+        "per_class":        per_class,
+        "rows":             rows,
     }
 
 # ── Model loader ──────────────────────────────────────────────────────────────
@@ -86,201 +111,123 @@ def compute_summary(rows):
 def download_model():
     if not os.path.exists(MODEL_PATH):
         with st.spinner("Downloading model… this may take a few minutes."):
-            url = f"https://drive.google.com/uc?id={GDRIVE_FILE_ID}"
-            gdown.download(url, MODEL_PATH, quiet=False)
+            gdown.download(f"https://drive.google.com/uc?id={GDRIVE_FILE_ID}", MODEL_PATH, quiet=False)
     return load_model(MODEL_PATH)
 
 # ── Page config ───────────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="EyeAI – Retinal Disease Classifier",
-    page_icon="👁️",
-    layout="wide",
-)
-
-init_metrics_log()
+st.set_page_config(page_title="EyeAI – Retinal Disease Classifier", page_icon="👁️", layout="wide")
+init_log()
 
 # ── CSS ───────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Sora:wght@300;400;600;700&family=DM+Sans:wght@300;400;500&display=swap');
-
-html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; color: rgba(255,255,255,0.88); }
-.stApp { background: #07111f !important; }
-
-[data-testid="stSidebar"] {
-  background: #0a1828 !important;
-  border-right: 1px solid rgba(0,200,255,0.08) !important;
-}
-[data-testid="stSidebar"] * { color: rgba(255,255,255,0.88) !important; }
-[data-testid="stSidebarContent"] { padding: 1.2rem 0.9rem !important; }
-
-::-webkit-scrollbar { width: 5px; }
-::-webkit-scrollbar-track { background: #07111f; }
-::-webkit-scrollbar-thumb { background: rgba(0,200,255,0.2); border-radius: 99px; }
+html,body,[class*="css"]{font-family:'DM Sans',sans-serif;color:rgba(255,255,255,.88);}
+.stApp{background:#07111f!important;}
+[data-testid="stSidebar"]{background:#0a1828!important;border-right:1px solid rgba(0,200,255,.08)!important;}
+[data-testid="stSidebar"] *{color:rgba(255,255,255,.88)!important;}
+[data-testid="stSidebarContent"]{padding:1.2rem .9rem!important;}
+::-webkit-scrollbar{width:5px;}::-webkit-scrollbar-track{background:#07111f;}::-webkit-scrollbar-thumb{background:rgba(0,200,255,.2);border-radius:99px;}
 
 /* HERO */
-.hero {
-  background: linear-gradient(135deg, #0d3b5e 0%, #091f33 70%, #061525 100%);
-  border-radius: 20px; padding: 2.6rem 2.4rem 2rem;
-  margin-bottom: 2rem; position: relative; overflow: hidden;
-  border: 1px solid rgba(0,200,255,0.12);
-}
-.hero::after {
-  content:""; position:absolute; top:-40%; right:-5%;
-  width:400px; height:400px; border-radius:50%;
-  background:radial-gradient(circle, rgba(0,180,255,0.07) 0%, transparent 70%);
-  pointer-events:none;
-}
-.hero-eyeai { font-family:'Sora',sans-serif; font-size:2.6rem; font-weight:700; color:#fff; margin-bottom:0.2rem; }
-.hero-eyeai span { color:#00c8ff; }
-.hero-tagline { font-size:0.97rem; color:rgba(255,255,255,0.5); max-width:580px; line-height:1.75; margin-bottom:1.1rem; }
-.hero-badge {
-  display:inline-flex; align-items:center; gap:0.4rem;
-  background:rgba(0,200,255,0.09); border:1px solid rgba(0,200,255,0.25);
-  border-radius:50px; padding:0.36rem 1rem;
-  color:#00c8ff; font-size:0.79rem; font-weight:500; letter-spacing:0.04em;
-}
-.stat-row { display:flex; gap:0.85rem; margin-top:1.5rem; flex-wrap:wrap; }
-.stat-card {
-  flex:1; min-width:105px;
-  background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.07);
-  border-radius:12px; padding:0.8rem 1rem; text-align:center;
-}
-.stat-number { font-family:'Sora',sans-serif; font-size:1.55rem; font-weight:700; color:#00c8ff; }
-.stat-label { font-size:0.7rem; color:rgba(255,255,255,0.36); margin-top:0.2rem; letter-spacing:0.04em; }
+.hero{background:linear-gradient(135deg,#0d3b5e 0%,#091f33 70%,#061525 100%);border-radius:20px;padding:2.6rem 2.4rem 2rem;margin-bottom:2rem;position:relative;overflow:hidden;border:1px solid rgba(0,200,255,.12);}
+.hero::after{content:"";position:absolute;top:-40%;right:-5%;width:400px;height:400px;border-radius:50%;background:radial-gradient(circle,rgba(0,180,255,.07) 0%,transparent 70%);pointer-events:none;}
+.hero-eyeai{font-family:'Sora',sans-serif;font-size:2.6rem;font-weight:700;color:#fff;margin-bottom:.2rem;}
+.hero-eyeai span{color:#00c8ff;}
+.hero-tagline{font-size:.97rem;color:rgba(255,255,255,.5);max-width:580px;line-height:1.75;margin-bottom:1.1rem;}
+.hero-badge{display:inline-flex;align-items:center;gap:.4rem;background:rgba(0,200,255,.09);border:1px solid rgba(0,200,255,.25);border-radius:50px;padding:.36rem 1rem;color:#00c8ff;font-size:.79rem;font-weight:500;letter-spacing:.04em;}
+.stat-row{display:flex;gap:.85rem;margin-top:1.5rem;flex-wrap:wrap;}
+.stat-card{flex:1;min-width:105px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.07);border-radius:12px;padding:.8rem 1rem;text-align:center;}
+.stat-number{font-family:'Sora',sans-serif;font-size:1.55rem;font-weight:700;color:#00c8ff;}
+.stat-label{font-size:.7rem;color:rgba(255,255,255,.36);margin-top:.2rem;letter-spacing:.04em;}
 
-/* SIDEBAR accordion */
-.sidebar-heading {
-  font-family:'Sora',sans-serif; font-size:0.76rem; font-weight:700;
-  color:#00c8ff; letter-spacing:0.1em; text-transform:uppercase;
-  margin-bottom:1rem; padding-bottom:0.5rem; border-bottom:1px solid rgba(0,200,255,0.15);
-}
-details.dcard {
-  background:rgba(255,255,255,0.03); border:1px solid rgba(0,200,255,0.1);
-  border-radius:12px; margin-bottom:0.6rem; overflow:hidden;
-}
-details.dcard[open] { border-color:rgba(0,200,255,0.28); }
-details.dcard summary {
-  list-style:none; cursor:pointer; padding:0.7rem 0.9rem;
-  display:flex; align-items:center; justify-content:space-between;
-  font-family:'Sora',sans-serif; font-size:0.83rem; font-weight:600; color:#fff; user-select:none;
-}
-details.dcard summary::-webkit-details-marker { display:none; }
-details.dcard summary .chevron { font-size:0.65rem; color:rgba(0,200,255,0.6); transition:transform 0.25s; }
-details.dcard[open] summary .chevron { transform:rotate(180deg); }
-details.dcard summary .dot { width:7px; height:7px; border-radius:50%; background:#00c8ff; flex-shrink:0; margin-right:0.5rem; opacity:0.7; }
-.dcard-inner { padding:0 0.9rem 0.9rem; }
-.dcard-inner img { width:100%; border-radius:9px; margin-bottom:0.6rem; object-fit:cover; height:135px; display:block; border:1px solid rgba(0,200,255,0.12); }
-.dcard-desc { font-size:0.77rem; color:rgba(255,255,255,0.56); line-height:1.65; }
-.sidebar-disclaimer {
-  background:rgba(255,170,0,0.06); border:1px solid rgba(255,170,0,0.18);
-  border-radius:10px; padding:0.72rem 0.88rem; margin-top:0.8rem;
-  font-size:0.71rem; color:rgba(255,255,255,0.38); line-height:1.65;
-}
+/* SIDEBAR */
+.sidebar-heading{font-family:'Sora',sans-serif;font-size:.76rem;font-weight:700;color:#00c8ff;letter-spacing:.1em;text-transform:uppercase;margin-bottom:1rem;padding-bottom:.5rem;border-bottom:1px solid rgba(0,200,255,.15);}
+details.dcard{background:rgba(255,255,255,.03);border:1px solid rgba(0,200,255,.1);border-radius:12px;margin-bottom:.6rem;overflow:hidden;}
+details.dcard[open]{border-color:rgba(0,200,255,.28);}
+details.dcard summary{list-style:none;cursor:pointer;padding:.7rem .9rem;display:flex;align-items:center;justify-content:space-between;font-family:'Sora',sans-serif;font-size:.83rem;font-weight:600;color:#fff;user-select:none;}
+details.dcard summary::-webkit-details-marker{display:none;}
+details.dcard summary .chevron{font-size:.65rem;color:rgba(0,200,255,.6);transition:transform .25s;}
+details.dcard[open] summary .chevron{transform:rotate(180deg);}
+details.dcard summary .dot{width:7px;height:7px;border-radius:50%;background:#00c8ff;flex-shrink:0;margin-right:.5rem;opacity:.7;}
+.dcard-inner{padding:0 .9rem .9rem;}
+.dcard-inner img{width:100%;border-radius:9px;margin-bottom:.6rem;object-fit:cover;height:135px;display:block;border:1px solid rgba(0,200,255,.12);}
+.dcard-desc{font-size:.77rem;color:rgba(255,255,255,.56);line-height:1.65;}
+.sidebar-disclaimer{background:rgba(255,170,0,.06);border:1px solid rgba(255,170,0,.18);border-radius:10px;padding:.72rem .88rem;margin-top:.8rem;font-size:.71rem;color:rgba(255,255,255,.38);line-height:1.65;}
 
-/* SECTION HEADERS */
-.sec-header {
-  font-family:'Sora',sans-serif; font-size:0.97rem; font-weight:600; color:#fff;
-  margin:1.6rem 0 0.85rem; display:flex; align-items:center; gap:0.4rem;
-  padding-bottom:0.45rem; border-bottom:1px solid rgba(255,255,255,0.06);
-}
-
-/* Upload */
-[data-testid="stFileUploader"] { background:rgba(0,200,255,0.02) !important; border:1.5px dashed rgba(0,200,255,0.2) !important; border-radius:12px !important; }
-[data-testid="stFileUploaderDropzone"] { background:transparent !important; }
+/* SECTIONS */
+.sec-header{font-family:'Sora',sans-serif;font-size:.97rem;font-weight:600;color:#fff;margin:1.6rem 0 .85rem;display:flex;align-items:center;gap:.4rem;padding-bottom:.45rem;border-bottom:1px solid rgba(255,255,255,.06);}
+[data-testid="stFileUploader"]{background:rgba(0,200,255,.02)!important;border:1.5px dashed rgba(0,200,255,.2)!important;border-radius:12px!important;}
+[data-testid="stFileUploaderDropzone"]{background:transparent!important;}
 
 /* RESULT CARDS */
-.pred-card {
-  background:rgba(0,200,255,0.05); border:1px solid rgba(0,200,255,0.2);
-  border-radius:15px; padding:1.3rem 1.1rem; text-align:center; margin-bottom:0.9rem;
-}
-.pred-eye { font-size:0.68rem; letter-spacing:0.12em; text-transform:uppercase; color:rgba(255,255,255,0.32); margin-bottom:0.4rem; }
-.pred-class { font-family:'Sora',sans-serif; font-size:1.7rem; font-weight:700; color:#00c8ff; }
-.pred-conf { font-size:0.83rem; color:rgba(255,255,255,0.42); margin-top:0.22rem; }
+.pred-card{background:rgba(0,200,255,.05);border:1px solid rgba(0,200,255,.2);border-radius:15px;padding:1.3rem 1.1rem;text-align:center;margin-bottom:.9rem;}
+.pred-eye{font-size:.68rem;letter-spacing:.12em;text-transform:uppercase;color:rgba(255,255,255,.32);margin-bottom:.4rem;}
+.pred-class{font-family:'Sora',sans-serif;font-size:1.7rem;font-weight:700;color:#00c8ff;}
+.pred-conf{font-size:.83rem;color:rgba(255,255,255,.42);margin-top:.22rem;}
+.prob-section{margin-top:.75rem;}
+.prob-row{display:flex;align-items:center;gap:.6rem;margin:.35rem 0;}
+.prob-name{font-size:.77rem;color:rgba(255,255,255,.5);width:165px;flex-shrink:0;}
+.prob-bar-bg{flex:1;height:6px;background:rgba(255,255,255,.07);border-radius:99px;}
+.prob-bar-fill{height:100%;border-radius:99px;background:linear-gradient(90deg,#005f8e,#00c8ff);}
+.prob-pct{font-size:.76rem;color:rgba(255,255,255,.38);width:36px;text-align:right;flex-shrink:0;}
 
-.prob-section { margin-top:0.75rem; }
-.prob-row { display:flex; align-items:center; gap:0.6rem; margin:0.35rem 0; }
-.prob-name { font-size:0.77rem; color:rgba(255,255,255,0.5); width:165px; flex-shrink:0; }
-.prob-bar-bg { flex:1; height:6px; background:rgba(255,255,255,0.07); border-radius:99px; }
-.prob-bar-fill { height:100%; border-radius:99px; background:linear-gradient(90deg,#005f8e,#00c8ff); }
-.prob-pct { font-size:0.76rem; color:rgba(255,255,255,0.38); width:36px; text-align:right; flex-shrink:0; }
+/* TRUE LABEL FORM */
+.label-box{background:rgba(255,200,0,.05);border:1px solid rgba(255,200,0,.2);border-radius:14px;padding:1.1rem 1.3rem;margin-top:.8rem;}
+.label-box-title{font-family:'Sora',sans-serif;font-size:.82rem;font-weight:600;color:#ffd966;margin-bottom:.5rem;}
+.label-hint{font-size:.75rem;color:rgba(255,255,255,.38);margin-top:.35rem;line-height:1.55;}
 
 /* METRICS DASHBOARD */
-.metrics-grid { display:flex; gap:0.9rem; flex-wrap:wrap; margin-bottom:1.2rem; }
-.metric-tile {
-  flex:1; min-width:130px;
-  background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.07);
-  border-radius:13px; padding:1rem 1.1rem; text-align:center;
-}
-.metric-val { font-family:'Sora',sans-serif; font-size:1.55rem; font-weight:700; color:#00c8ff; }
-.metric-key { font-size:0.72rem; color:rgba(255,255,255,0.36); margin-top:0.2rem; letter-spacing:0.03em; }
+.metrics-grid{display:flex;gap:.9rem;flex-wrap:wrap;margin-bottom:1.2rem;}
+.metric-tile{flex:1;min-width:130px;background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.07);border-radius:13px;padding:1rem 1.1rem;text-align:center;}
+.metric-val{font-family:'Sora',sans-serif;font-size:1.55rem;font-weight:700;color:#00c8ff;}
+.metric-key{font-size:.72rem;color:rgba(255,255,255,.36);margin-top:.2rem;letter-spacing:.03em;}
+.metric-note{font-size:.68rem;color:rgba(255,255,255,.25);margin-top:.15rem;}
 
-.dist-row { display:flex; align-items:center; gap:0.7rem; margin:0.4rem 0; }
-.dist-label { font-size:0.8rem; color:rgba(255,255,255,0.55); width:175px; flex-shrink:0; }
-.dist-bar-bg { flex:1; height:7px; background:rgba(255,255,255,0.07); border-radius:99px; }
-.dist-bar-fill { height:100%; border-radius:99px; background:linear-gradient(90deg,#005f8e,#00c8ff); }
-.dist-count { font-size:0.78rem; color:rgba(255,255,255,0.4); width:28px; text-align:right; flex-shrink:0; }
+/* PER-CLASS TABLE */
+.cls-table{width:100%;border-collapse:collapse;font-size:.8rem;margin-top:.6rem;}
+.cls-table th{background:rgba(0,200,255,.08);color:#00c8ff;padding:.55rem .8rem;text-align:left;border-bottom:1px solid rgba(0,200,255,.15);font-family:'Sora',sans-serif;font-size:.73rem;letter-spacing:.05em;}
+.cls-table td{padding:.5rem .8rem;color:rgba(255,255,255,.6);border-bottom:1px solid rgba(255,255,255,.04);}
+.cls-table tr:last-child td{border-bottom:none;}
+.cls-table tr:hover td{background:rgba(0,200,255,.04);}
+.good{color:#4ade80!important;font-weight:600;}
+.warn{color:#fbbf24!important;font-weight:600;}
+.bad{color:#f87171!important;font-weight:600;}
 
-.log-table { width:100%; border-collapse:collapse; font-size:0.78rem; margin-top:0.5rem; }
-.log-table th {
-  background:rgba(0,200,255,0.08); color:#00c8ff;
-  padding:0.55rem 0.7rem; text-align:left;
-  border-bottom:1px solid rgba(0,200,255,0.15);
-  font-family:'Sora',sans-serif; font-size:0.72rem; letter-spacing:0.05em;
-}
-.log-table td { padding:0.48rem 0.7rem; color:rgba(255,255,255,0.6); border-bottom:1px solid rgba(255,255,255,0.04); }
-.log-table tr:last-child td { border-bottom:none; }
-.log-table tr:hover td { background:rgba(0,200,255,0.04); }
+/* LOG TABLE */
+.log-table{width:100%;border-collapse:collapse;font-size:.77rem;margin-top:.5rem;}
+.log-table th{background:rgba(0,200,255,.08);color:#00c8ff;padding:.5rem .7rem;text-align:left;border-bottom:1px solid rgba(0,200,255,.15);font-family:'Sora',sans-serif;font-size:.7rem;letter-spacing:.05em;}
+.log-table td{padding:.45rem .7rem;color:rgba(255,255,255,.55);border-bottom:1px solid rgba(255,255,255,.04);}
+.log-table .correct{color:#4ade80!important;}
+.log-table .wrong{color:#f87171!important;}
 
-h1,h2,h3,h4,p,label,.stMarkdown { color:rgba(255,255,255,0.88) !important; }
-hr { border-color:rgba(255,255,255,0.06) !important; }
+h1,h2,h3,h4,p,label,.stMarkdown{color:rgba(255,255,255,.88)!important;}
+hr{border-color:rgba(255,255,255,.06)!important;}
 </style>
 """, unsafe_allow_html=True)
-
-# ── Class mapping ─────────────────────────────────────────────────────────────
-CLASS_NAMES = {0: "Glaucoma", 1: "Normal", 2: "Diabetic Retinopathy", 3: "Cataract"}
 
 # ── SIDEBAR ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown('<div class="sidebar-heading">🔬 Disease Reference Guide</div>', unsafe_allow_html=True)
-
     diseases = [
-        ("Glaucoma",             GLAUCOMA_IMG,
-         "Optic nerve damage from elevated eye pressure. Progresses silently — early detection prevents irreversible vision loss."),
-        ("Normal",               NORMAL_IMG,
-         "Healthy retina with clear vessels and no pathology. Routine check-ups are still recommended."),
-        ("Diabetic Retinopathy", DIABETIC_IMG,
-         "Retinal vessel damage from chronic high blood sugar. Often symptom-free early; severe cases lead to blindness."),
-        ("Cataract",             CATARACT_IMG,
-         "Lens clouding, usually age-related. Causes blurry vision and glare — correctable with outpatient surgery."),
+        ("Glaucoma",             GLAUCOMA_IMG, "Optic nerve damage from elevated eye pressure. Progresses silently — early detection prevents irreversible vision loss."),
+        ("Normal",               NORMAL_IMG,   "Healthy retina with clear vessels and no pathology. Routine check-ups are still recommended."),
+        ("Diabetic Retinopathy", DIABETIC_IMG, "Retinal vessel damage from chronic high blood sugar. Often symptom-free early; severe cases lead to blindness."),
+        ("Cataract",             CATARACT_IMG, "Lens clouding, usually age-related. Causes blurry vision and glare — correctable with outpatient surgery."),
     ]
-
     for name, img_b64, desc in diseases:
         st.markdown(f"""
         <details class="dcard">
-          <summary>
-            <span style="display:flex;align-items:center;">
-              <span class="dot"></span>{name}
-            </span>
-            <span class="chevron">▼</span>
-          </summary>
-          <div class="dcard-inner">
-            <img src="{img_b64}" alt="{name}" />
-            <div class="dcard-desc">{desc}</div>
-          </div>
-        </details>
-        """, unsafe_allow_html=True)
-
+          <summary><span style="display:flex;align-items:center;"><span class="dot"></span>{name}</span><span class="chevron">▼</span></summary>
+          <div class="dcard-inner"><img src="{img_b64}" alt="{name}"/><div class="dcard-desc">{desc}</div></div>
+        </details>""", unsafe_allow_html=True)
     st.markdown('<div class="sidebar-disclaimer">⚠️ For screening purposes only. Consult a qualified ophthalmologist for clinical diagnosis.</div>', unsafe_allow_html=True)
 
 # ── HERO ──────────────────────────────────────────────────────────────────────
 st.markdown("""
 <div class="hero">
   <div class="hero-eyeai">👁️ Eye<span>AI</span></div>
-  <div class="hero-tagline">
-    Upload fundus photographs of both eyes for instant AI-powered screening
-    across four common retinal conditions.
-  </div>
+  <div class="hero-tagline">Upload fundus photographs of both eyes for instant AI-powered screening across four common retinal conditions.</div>
   <div class="hero-badge">🧠 95% Accuracy &nbsp;·&nbsp; 4 Disease Classes</div>
   <div class="stat-row">
     <div class="stat-card"><div class="stat-number">95%</div><div class="stat-label">Accuracy</div></div>
@@ -314,150 +261,140 @@ if left_file or right_file:
     p1, p2 = st.columns(2)
     with p1:
         if left_file:
-            img = Image.open(left_file)
-            img.thumbnail((320, 220))
-            st.image(img, caption="Left Eye", use_container_width=False)
+            img = Image.open(left_file); img.thumbnail((320, 220)); st.image(img, caption="Left Eye", use_container_width=False)
     with p2:
         if right_file:
-            img = Image.open(right_file)
-            img.thumbnail((320, 220))
-            st.image(img, caption="Right Eye", use_container_width=False)
+            img = Image.open(right_file); img.thumbnail((320, 220)); st.image(img, caption="Right Eye", use_container_width=False)
 
-# ── PREDICT + LOG ─────────────────────────────────────────────────────────────
+# ── PREDICT ───────────────────────────────────────────────────────────────────
 def predict(image_file):
-    img = Image.open(image_file).convert("RGB").resize((224, 224))
-    arr = preprocess_input(np.array(img, dtype="float32"))
-    start = datetime.datetime.now()
+    img  = Image.open(image_file).convert("RGB").resize((224, 224))
+    arr  = preprocess_input(np.array(img, dtype="float32"))
     probs = model.predict(np.expand_dims(arr, 0))[0]
-    elapsed_ms = (datetime.datetime.now() - start).total_seconds() * 1000
-    idx = int(np.argmax(probs))
-    return idx, probs, elapsed_ms
+    return int(np.argmax(probs)), probs
 
-def prob_bars_html(probs, class_names):
+def prob_bars_html(probs):
     html = '<div class="prob-section">'
     for i, p in enumerate(probs):
-        html += f"""
-        <div class="prob-row">
-          <div class="prob-name">{class_names[i]}</div>
-          <div class="prob-bar-bg"><div class="prob-bar-fill" style="width:{p*100:.1f}%"></div></div>
-          <div class="prob-pct">{p*100:.1f}%</div>
-        </div>"""
-    html += '</div>'
-    return html
+        html += f'<div class="prob-row"><div class="prob-name">{CLASS_LIST[i]}</div><div class="prob-bar-bg"><div class="prob-bar-fill" style="width:{p*100:.1f}%"></div></div><div class="prob-pct">{p*100:.1f}%</div></div>'
+    return html + '</div>'
 
 if left_file and right_file:
     st.markdown('<div class="sec-header">🔍 Classification Results</div>', unsafe_allow_html=True)
-
     left_file.seek(0); right_file.seek(0)
-    l_idx, l_probs, l_ms = predict(left_file)
-    r_idx, r_probs, r_ms = predict(right_file)
-    class_names = list(CLASS_NAMES.values())
-
-    # ── Log both predictions ──────────────────────────────────────────────────
-    log_prediction("Left",  CLASS_NAMES[l_idx], l_probs, l_ms)
-    log_prediction("Right", CLASS_NAMES[r_idx], r_probs, r_ms)
+    l_idx, l_probs = predict(left_file)
+    r_idx, r_probs = predict(right_file)
 
     r1, r2 = st.columns(2)
     with r1:
-        st.markdown(f"""
-        <div class="pred-card">
-          <div class="pred-eye">Left Eye</div>
-          <div class="pred-class">{CLASS_NAMES[l_idx]}</div>
-          <div class="pred-conf">Confidence: {l_probs[l_idx]*100:.1f}% &nbsp;|&nbsp; ⏱ {l_ms:.0f} ms</div>
-        </div>""", unsafe_allow_html=True)
-        st.markdown(prob_bars_html(l_probs, class_names), unsafe_allow_html=True)
-
+        st.markdown(f'<div class="pred-card"><div class="pred-eye">Left Eye</div><div class="pred-class">{CLASS_NAMES[l_idx]}</div><div class="pred-conf">Confidence: {l_probs[l_idx]*100:.1f}%</div></div>', unsafe_allow_html=True)
+        st.markdown(prob_bars_html(l_probs), unsafe_allow_html=True)
     with r2:
-        st.markdown(f"""
-        <div class="pred-card">
-          <div class="pred-eye">Right Eye</div>
-          <div class="pred-class">{CLASS_NAMES[r_idx]}</div>
-          <div class="pred-conf">Confidence: {r_probs[r_idx]*100:.1f}% &nbsp;|&nbsp; ⏱ {r_ms:.0f} ms</div>
-        </div>""", unsafe_allow_html=True)
-        st.markdown(prob_bars_html(r_probs, class_names), unsafe_allow_html=True)
+        st.markdown(f'<div class="pred-card"><div class="pred-eye">Right Eye</div><div class="pred-class">{CLASS_NAMES[r_idx]}</div><div class="pred-conf">Confidence: {r_probs[r_idx]*100:.1f}%</div></div>', unsafe_allow_html=True)
+        st.markdown(prob_bars_html(r_probs), unsafe_allow_html=True)
+
+    # ── TRUE LABEL INPUT (needed to compute real metrics) ─────────────────────
+    st.markdown('<div class="sec-header">🏷️ Provide True Labels to Log Metrics</div>', unsafe_allow_html=True)
+    st.markdown("""
+    <div class="label-box">
+      <div class="label-box-title">📋 Clinician / Ground Truth Labels</div>
+      <div class="label-hint">
+        Accuracy, Precision, Recall and F1-Score require knowing the <b>correct diagnosis</b> for each image.
+        Select the true condition below — these are logged alongside the model prediction to compute real evaluation metrics.
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    lc, rc = st.columns(2)
+    with lc:
+        true_left = st.selectbox("True diagnosis — Left Eye", CLASS_LIST, key="true_left")
+    with rc:
+        true_right = st.selectbox("True diagnosis — Right Eye", CLASS_LIST, key="true_right")
+
+    if st.button("✅ Log Predictions with True Labels", use_container_width=True):
+        append_log("Left",  true_left,  CLASS_NAMES[l_idx], float(l_probs[l_idx]))
+        append_log("Right", true_right, CLASS_NAMES[r_idx], float(r_probs[r_idx]))
+        st.success("Logged! Scroll down to see updated metrics.")
 
 elif left_file or right_file:
     st.info("👆 Upload **both** left and right eye images to run classification.")
 
 # ════════════════════════════════════════════════════════════════════
-# METRICS DASHBOARD
+# METRICS DASHBOARD — Accuracy, Precision, Recall, F1
 # ════════════════════════════════════════════════════════════════════
-st.markdown('<div class="sec-header">📊 Model Performance Metrics Log</div>', unsafe_allow_html=True)
+st.markdown('<div class="sec-header">📊 Model Performance Metrics</div>', unsafe_allow_html=True)
 
-rows   = load_metrics_log()
-summary = compute_summary(rows)
+rows    = load_log()
+metrics = compute_metrics(rows)
 
-if not summary:
-    st.info("No predictions logged yet. Upload images above to generate metrics.")
+if not metrics:
+    st.info("No labelled predictions yet. Run a classification above, enter the true diagnosis and click **Log**.")
 else:
-    # ── Summary tiles ─────────────────────────────────────────────────────────
+    m = metrics
+
+    def color_class(val):
+        if val >= 80: return "good"
+        if val >= 50: return "warn"
+        return "bad"
+
+    # ── Overall summary tiles ─────────────────────────────────────────────────
     st.markdown(f"""
     <div class="metrics-grid">
       <div class="metric-tile">
-        <div class="metric-val">{summary["total_predictions"]}</div>
-        <div class="metric-key">Total Predictions</div>
+        <div class="metric-val">{m["total"]}</div>
+        <div class="metric-key">Samples Logged</div>
       </div>
       <div class="metric-tile">
-        <div class="metric-val">{summary["avg_confidence"]}%</div>
-        <div class="metric-key">Avg Confidence</div>
+        <div class="metric-val {color_class(m["overall_accuracy"])}">{m["overall_accuracy"]}%</div>
+        <div class="metric-key">Overall Accuracy</div>
+        <div class="metric-note">correct / total</div>
       </div>
       <div class="metric-tile">
-        <div class="metric-val">{summary["min_confidence"]}%</div>
-        <div class="metric-key">Min Confidence</div>
+        <div class="metric-val {color_class(m["macro_precision"])}">{m["macro_precision"]}%</div>
+        <div class="metric-key">Macro Precision</div>
+        <div class="metric-note">avg across classes</div>
       </div>
       <div class="metric-tile">
-        <div class="metric-val">{summary["max_confidence"]}%</div>
-        <div class="metric-key">Max Confidence</div>
+        <div class="metric-val {color_class(m["macro_recall"])}">{m["macro_recall"]}%</div>
+        <div class="metric-key">Macro Recall</div>
+        <div class="metric-note">avg across classes</div>
       </div>
       <div class="metric-tile">
-        <div class="metric-val">{summary["avg_inference_ms"]} ms</div>
-        <div class="metric-key">Avg Inference Time</div>
+        <div class="metric-val {color_class(m["macro_f1"])}">{m["macro_f1"]}%</div>
+        <div class="metric-key">Macro F1-Score</div>
+        <div class="metric-note">harmonic mean P&R</div>
       </div>
     </div>
     """, unsafe_allow_html=True)
 
-    # ── Class distribution bars ───────────────────────────────────────────────
-    st.markdown("**Prediction Class Distribution**")
-    dist = summary["class_distribution"]
-    total = summary["total_predictions"]
-    dist_html = ""
-    for cls in CLASS_NAMES.values():
-        count = dist.get(cls, 0)
-        pct   = (count / total) * 100 if total else 0
-        dist_html += f"""
-        <div class="dist-row">
-          <div class="dist-label">{cls}</div>
-          <div class="dist-bar-bg"><div class="dist-bar-fill" style="width:{pct:.1f}%"></div></div>
-          <div class="dist-count">{count}</div>
-        </div>"""
-    st.markdown(dist_html, unsafe_allow_html=True)
+    # ── Per-class breakdown ───────────────────────────────────────────────────
+    st.markdown("**Per-Class Metrics**")
+    table = '<table class="cls-table"><thead><tr><th>Class</th><th>Precision</th><th>Recall</th><th>F1-Score</th><th>Support</th></tr></thead><tbody>'
+    for cls in CLASS_LIST:
+        pc = m["per_class"][cls]
+        table += f'<tr><td>{cls}</td><td class="{color_class(pc["precision"])}">{pc["precision"]}%</td><td class="{color_class(pc["recall"])}">{pc["recall"]}%</td><td class="{color_class(pc["f1"])}">{pc["f1"]}%</td><td>{pc["support"]}</td></tr>'
+    table += "</tbody></table>"
+    st.markdown(table, unsafe_allow_html=True)
 
-    # ── Recent predictions table ──────────────────────────────────────────────
+    # ── Recent log ───────────────────────────────────────────────────────────
     st.markdown("<br>**Recent Prediction Log** *(last 10)*", unsafe_allow_html=True)
     recent = rows[-10:][::-1]
-    table_html = """
-    <table class="log-table">
-      <thead><tr>
-        <th>Timestamp</th><th>Eye</th><th>Predicted Class</th>
-        <th>Confidence</th><th>Inference (ms)</th>
-      </tr></thead><tbody>"""
+    log_html = '<table class="log-table"><thead><tr><th>Timestamp</th><th>Eye</th><th>True Label</th><th>Predicted</th><th>Conf %</th><th>✓/✗</th></tr></thead><tbody>'
     for r in recent:
-        table_html += f"""<tr>
-          <td>{r["timestamp"]}</td>
-          <td>{r["eye_side"]}</td>
-          <td>{r["predicted_class"]}</td>
-          <td>{r["confidence_%"]}%</td>
-          <td>{r["inference_time_ms"]}</td>
-        </tr>"""
-    table_html += "</tbody></table>"
-    st.markdown(table_html, unsafe_allow_html=True)
+        ok = r["true_label"] == r["predicted_label"]
+        mark_cls = "correct" if ok else "wrong"
+        mark = "✓" if ok else "✗"
+        log_html += f'<tr><td>{r["timestamp"]}</td><td>{r["eye_side"]}</td><td>{r["true_label"]}</td><td>{r["predicted_label"]}</td><td>{r["confidence_%"]}%</td><td class="{mark_cls}">{mark}</td></tr>'
+    log_html += "</tbody></table>"
+    st.markdown(log_html, unsafe_allow_html=True)
 
-    # ── Download button ───────────────────────────────────────────────────────
+    # ── Download ──────────────────────────────────────────────────────────────
     st.markdown("<br>", unsafe_allow_html=True)
     with open(METRICS_FILE, "rb") as f:
-        st.download_button(
-            label="⬇️ Download Full Metrics Log (CSV)",
-            data=f,
-            file_name="eyeai_metrics_log.csv",
-            mime="text/csv",
-        )
+        st.download_button("⬇️ Download Metrics Log (CSV)", f, file_name="eyeai_metrics_log.csv", mime="text/csv")
+
+    if st.button("🗑️ Clear All Logs", type="secondary"):
+        os.remove(METRICS_FILE)
+        init_log()
+        st.rerun()
